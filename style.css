@@ -1,0 +1,15 @@
+* {
+	padding: 0;
+	margin: 0;
+}
+
+body {
+	color: #eeeeee;
+	background: #222222;
+}
+
+canvas-layer {
+	width: 100vw;
+	height: 100vh;
+	background: #333333;
+}
