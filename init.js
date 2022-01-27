@@ -1,5 +1,6 @@
 'use strict';
 let {
+	NameSpace, SymbolSpace,
 	codeShell, createPrivileges, random, JSONcopy,
 	loader, loadImage, loadScript, generateImage,
 	EventEmitter, Scene, Child,

@@ -8,8 +8,9 @@ Scene.create('main', function() {
 	
 	let virenv = new virenv_ns.VirtualEnv();
 	
-	let loadScr = filepath => fetch('virenv/'+filepath).then(data => data.text())
-		.then(data => virenv.fs.writeFileSync(filepath, data));
+	let loadScr = filepath => fetch('virenv/'+filepath)
+		.then(data => data.text())
+		.then(data => virenv.fs.writeFileSync(filepath, data, console.error));
 	
 	
 	Promise.all([
@@ -19,7 +20,6 @@ Scene.create('main', function() {
 	]).then(() => {
 		virenv.run('main.js');
 	});
-		
 
 
 	//===============update===============//
