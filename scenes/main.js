@@ -18,7 +18,7 @@ Scene.create('main', function() {
 		loadScr('module1.js'),
 		loadScr('module2.js')
 	]).then(() => {
-		virenv.run('main.js');
+	//	virenv.run('main.js');
 	});
 
 

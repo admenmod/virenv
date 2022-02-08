@@ -51,7 +51,7 @@ let virenv_ns = new function() {
 		}, time);
 	});
 	
-	
+	// CONSTANTS
 	const MODE_BLOB    = 0x000001;
 	const MODE_TREE    = 0x000002;
 	const MODE_SYMLINK = 0x000003;
@@ -91,10 +91,11 @@ let virenv_ns = new function() {
 			this._src = this.toSource();
 			
 			this.isNormalize = Path.isNormalize(this.src);
+			
+			Object.assign(this, Path.file(this));
 		}
 		
 		toSource() { return Path.toSource(this); }
-		file() { return Path.file(this); }
 		
 		normalize() { return Path.normalize(this, true); }
 		
@@ -108,9 +109,10 @@ let virenv_ns = new function() {
 		static dirExp = /\/+/;
 		static fileExp = /\.(?!.*\.)/;
 		
+		// NOTE: относительный путь, учет ".../", "..."
 		static isAbsolute(src) { return src.startsWith('/'); }
 		static isRelative(src) { return src === '.' || src === '..' || src.startsWith('./') || src.startsWith('../'); }
-		static isPassive(src) { return !Path.isAbsolute(src) && !Path.isRelative(src); }
+		static isPassive(src) { return !(Path.isAbsolute(src) || Path.isRelative(src)); }
 		static isDirectory(src) { return src.endsWith('/'); }
 		static isNormalize(src) { return !Path.parse(src).some(i => i === '.' || i === '..'); }
 		
@@ -187,7 +189,16 @@ let virenv_ns = new function() {
 	console.log(nnn.normalize(), nnn.normalize() === nnn);
 	//*/
 	
-	
+	/*	TODO:
+	 *	BUG:
+	 *	NOTE:
+		
+		FS Protocol* // meta
+		FS Storage // физический файл | бинарные данные
+		FS Virtual View // виртуальное представление FS в оперативной памяти
+		FS SystemInfo (data) // информация о экземпляре файловой системы
+	*/
+
 	let FileSystem = class extends EventEmitter {
 		constructor(id) {
 			super();
@@ -216,10 +227,9 @@ let virenv_ns = new function() {
 		
 		getDataFile(src) {
 			let path = Path.normalize(src);
-			let { filename } = Path.file(path);
 			let [fileId, dirId] = this.getIdByPath(path);
 			
-			return this.getDirFiles(dirId).find(file => file[INDEX_FILENAME] === filename);
+			return this.getDirFiles(dirId).find(file => file[INDEX_FILENAME] === path.filename);
 		}
 		
 		getIdByPath(src) {
@@ -294,14 +304,13 @@ let virenv_ns = new function() {
 			
 			let path = Path.normalize(src);
 			let [fileId, dirId] = this.getIdByPath(path);
-			let { filename } = Path.file(path);
 			
 			if(!dirId) return void error(Error(`path does not exist "${path}"`));
-			if(!filename) return void error(Error(`invalid path "${src}"`));
+			if(!path.filename) return void error(Error(`invalid path "${src}"`));
 			
 			let blobId = generateID();
 			if(!fileId) {
-				this._storage[dirId] += FileSystem.generateFile(MODE_BLOB, TYPE_BLOB, blobId, filename);
+				this._storage[dirId] += FileSystem.generateFile(MODE_BLOB, TYPE_BLOB, blobId, path.filename);
 			};
 			
 			this._storage[blobId] = data;
@@ -369,14 +378,13 @@ let virenv_ns = new function() {
 			
 			let path = Path.normalize(src);
 			let [fileId, dirId] = this.getIdByPath(path);
-			let { filename } = Path.file(path);
 			
 			if(fileId) return void error(Error(`cannot create directory "${src}": File exists`));
 			if(!dirId) return void error(Error(`path does not exist "${path}"`));
-			if(!filename) return void error(Error(`invalid path "${src}"`));
+			if(!path.filename) return void error(Error(`invalid path "${src}"`));
 			
 			let blobId = generateID();
-			this._storage[dirId] += FileSystem.generateFile(MODE_TREE, TYPE_TREE, blobId, filename);
+			this._storage[dirId] += FileSystem.generateFile(MODE_TREE, TYPE_TREE, blobId, path.filename);
 			this._storage[blobId] = '';
 			
 			return true;
@@ -447,18 +455,101 @@ let virenv_ns = new function() {
 	};
 	
 	
+	class Session {
+		constructor(virenv) {
+			this.namespace = new NameSpace();
+			this.currentPath = new Path('/');
+			
+			this.namespace.PATH = this.currentPath.toString();
+			this.on('changedir', (next, prev) => this.namespace.PATH = `${next}`);
+		}
+	};
+	
+	
+	class Process extends EventEmitter {
+		constructor(virenv, additionalApi) {
+			super();
+			
+			this.namespace = new NameSpace(virenv.namespace);
+			this.path = new Path(virenv.currentPath.toString());
+			
+			this.api = {
+				...additionalApi,
+				
+				process: {
+					env: this.namespace,
+					execPath: this.path.toString()
+				}
+			};
+			Object.defineProperty(this.api, 'global', { value: this.api });
+			
+			
+			Object.assign(this.api, {
+				...BASE_API,
+				console: { ...virenv.debugger.console }
+			});
+			
+			
+			this.require = (src, dir = '', cache = {}) => {
+				let module = null;
+				let path = Path.relative(src, dir);
+				
+				if(cache[path]) module = cache[path];
+				else if(module = virenv.getModule(src)) module = module(this.api);
+				else if(virenv.fs.hasFileSync(path)) module = this.execute(path);
+				
+				if(!module) virenv.debugger.console.error(Error(`module "${path}" not found`));
+				cache[path] = module;
+				
+				return module.exports || module;
+			};
+			
+			
+			this.execute = src => {
+				let path = Path.relative(src, this.path, virenv.currentPath).normalize();
+				
+				if(path.isDirectory) {
+					return void virenv.debugger.console.error(Error(`directory cannot be executed "${path}"`));
+				};
+				
+				let data = virenv.fs.readFileSync(path, virenv.debugger.console.error);
+				
+				
+				switch(path.exp) {
+					case 'json': return JSON.parse(data)
+					
+					case 'js': {
+						let cache = {};
+						let api = this.api;
+						
+						api.require = src => this.require(src, path.dirpath, cache);
+						api.require.cache = cache;
+						
+						api.module = {
+							exports: {},
+							filename: path.toString()
+						};
+						
+						executeCode(data, this.api, {
+							debugger: virenv.debugger,
+							source: path.toString()
+						})
+						
+						return api.module;
+					}
+					
+					default: return data
+				};
+			};
+		}
+	};
+	
+	
 	let VirtualEnv = this.VirtualEnv = class extends EventEmitter {
 		constructor(fsId = 'fs_storage', p = {}) {
 			super();
 			
-			this.namespace = new NameSpace();
-			this.namespace.PATH = '/';
-			
 			this.fs = new FileSystem(fsId);
-			this.on('changedir', (next, prev) => this.namespace.PATH = `${next}`);
-			
-			this.rootpath = new Path(this.namespace.PATH);
-			this.currentPath = new Path(this.namespace.PATH);
 			
 			this.debugger = new Debugger(console);
 			
@@ -477,14 +568,23 @@ let virenv_ns = new function() {
 		
 		appendModule(name, module) { return this._appendModule(name, module, 'native'); }
 		
-		hasModule(path) {
-			return Boolean(this.coreModules[path] || this.globalModules[path] || this.nativeModules[path]);
-		}
-		
 		getModule(path) {
+			this.namespace = new NameSpace();
+			
 			return this.coreModules[path] || this.globalModules[path] || this.nativeModules[path];
 		}
 		
+		newSession() {
+			return new Session(this);
+		}
+		
+		createProcess(additionalApi = {}) {
+			let process = new Process(this, additionalApi);
+		//	console.log(process);
+			
+			return process;
+		}
+		/*
 		createProcess(additionalApi = {}) {
 			let execPath = new Path(this.currentPath.toString());
 			
@@ -493,7 +593,7 @@ let virenv_ns = new function() {
 				filename: execPath.toString()
 			};
 			
-			// сделать потом незабыть относительный путь в require
+			
 			let require = (src, dir = '') => {
 				let module = null;
 				let path = Path.relative(src, dir);
@@ -551,41 +651,48 @@ let virenv_ns = new function() {
 			
 			return execute;
 		}
+		*/
 		
-		cmd(code) {
-			if(this.env_global) return executeCode(code, this.env_global, {
-				source: 'console',
-				debugger: this.debugger
-			});
+		/*
+			root: корневой католог
+			current: текущий католог
+			execute: католог в котором был создан process
+			path: каталог в котором запущен текущий файл
 			
-			this.env_global = {
-				Path, fs: this.fs,
-				
-				cd: (...args) => this.cd(...args),
-				run: (...args) => this.run(...args),
-				
-				env: this.namespace,
-				
-			//	...BASE_API,
-				
-				console: this.debugger.console
-			};
-			
-			this.cmd(code);
-		}
+			чтобы получить пути до
+				root = Path.relative('/')
+				current = Path.relative({cd path}, root)
+				execute = Path.relative(current.now, root)
+				path = Path.relative(src, execute, root)
+		*/
 		
-		cd(path) {
+		
+		cd(src) {
 			let prev = this.currentPath.toString();
-			let next = Path.relative(path, this.currentPath).normalize().toString();
+			let next = Path.relative(src, this.currentPath).normalize().toString();
 			
 			this.currentPath.src = next;
 			this.emit('changedir', next, prev);
 		}
 		
 		run(src) {
-			let execute = this.createProcess();
+			return this.createProcess().execute(src);
+		}
+		
+		cmd(code) {
+			if(this.cmd_process) return executeCode(code, this.cmd_process.api, {
+				source: 'console',
+				debugger: this.debugger
+			});
 			
-			execute(src);
+			this.cmd_process = this.createProcess({
+				Path, fs: this.fs,
+				
+				cd: (...args) => this.cd(...args),
+				run: (...args) => this.run(...args),
+			});
+			
+			this.cmd(code);
 		}
 	};
 	
@@ -599,7 +706,7 @@ let virenv_ns = new function() {
 	
 	let virenv = new VirtualEnv('ve');
 //	console.log(virenv.fs._storage);
-	/*
+	//*
 	virenv.fs.mkdirSync('root', console.error);
 	virenv.fs.mkdirSync('root/dir', console.error);
 	virenv.fs.writeFileSync('root/dir/dd.json', '{ "jsondata": "bigdata" }', console.error);
@@ -611,20 +718,21 @@ let virenv_ns = new function() {
 	
 //	console.log(Object.getOwnPropertySymbols(EventEmitter).map(i => i.description));
 	
-	console.log(process);
+//	console.log(process);
 	
 	let dd = require('dir/dd.json');
 	console.log(dd);
 	`, console.error);
-	*/
+	//*/
 //	console.log(virenv.fs._storage);
 	
-	virenv.cmd('console.log("hjggh")');
+	virenv.cmd('console.log(this)');
 	
-//	virenv.cd('root');
+	virenv.cd('root');
 //	virenv.run('main.js');
 	
 	
 //	virenv.run('root/main.js');
 	//*/
 };
+

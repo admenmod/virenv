@@ -1,8 +1,6 @@
 let module2 = require('module2.js');
 
-let pr = 39;
-
-console.log('module1');
+let prv1 = 39;
 
 
 module.exports.loop = function() {
@@ -10,6 +8,8 @@ module.exports.loop = function() {
 };
 
 module.exports = {
-	pr,
-	kdkd: 30
+	prv1,
+	pub1: 30
 }
+
+console.log('inited module1');
